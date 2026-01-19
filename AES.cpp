@@ -1,0 +1,647 @@
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+// MIT License
+
+// Copyright (c) 2026 oiko-nomikos
+
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+#include <vector>
+#include <string>
+#include <cstring>
+#include <sstream>
+#include <cstdint>
+#include <algorithm>
+#include <iostream>
+#include <iomanip>
+#include <random>
+#include <deque>
+#include <mutex>
+#include <chrono>
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+void printHex(const std::vector<uint8_t> &data) {
+    for (uint8_t b : data)
+        std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
+    std::cout << std::dec << '\n';
+}
+
+struct DerivedKey {
+    std::string key;  // derived key material
+    std::string salt; // salt used
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class SystemClock {
+  public:
+    inline long long getSeconds() {
+        auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::seconds>(now.time_since_epoch()).count();
+    }
+
+    inline long long getMilliseconds() {
+        auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    }
+
+    inline long long getMicroseconds() {
+        auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+    }
+
+    inline long long getNanoseconds() {
+        auto now = std::chrono::system_clock::now();
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+    }
+};
+
+// Global Instance
+SystemClock systemClock;
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+namespace CRYPTO {
+class SHA256 {
+  public:
+    SHA256() { reset(); }
+
+    void update(const uint8_t *data, size_t len) {
+        for (size_t i = 0; i < len; ++i) {
+            buffer[bufferLen++] = data[i];
+            if (bufferLen == 64) {
+                transform(buffer);
+                bitlen += 512;
+                bufferLen = 0;
+            }
+        }
+    }
+
+    void update(const std::string &data) { update(reinterpret_cast<const uint8_t *>(data.c_str()), data.size()); }
+
+    std::string digest() {
+        uint64_t totalBits = bitlen + bufferLen * 8;
+
+        buffer[bufferLen++] = 0x80;
+        if (bufferLen > 56) {
+            while (bufferLen < 64)
+                buffer[bufferLen++] = 0x00;
+            transform(buffer);
+            bufferLen = 0;
+        }
+
+        while (bufferLen < 56)
+            buffer[bufferLen++] = 0x00;
+
+        for (int i = 7; i >= 0; --i)
+            buffer[bufferLen++] = (totalBits >> (i * 8)) & 0xFF;
+
+        transform(buffer);
+
+        std::ostringstream oss;
+        for (int i = 0; i < 8; ++i)
+            oss << std::hex << std::setw(8) << std::setfill('0') << h[i];
+
+        reset(); // reset internal state after digest
+        return oss.str();
+    }
+
+    std::string digestBinary() {
+        std::string hex = digest();
+        std::string binary;
+        for (char c : hex) {
+            uint8_t val = (c <= '9') ? c - '0' : 10 + (std::tolower(c) - 'a');
+            for (int i = 3; i >= 0; --i)
+                binary += ((val >> i) & 1) ? '1' : '0';
+        }
+        return binary;
+    }
+
+    void reset() {
+        h[0] = 0x6a09e667;
+        h[1] = 0xbb67ae85;
+        h[2] = 0x3c6ef372;
+        h[3] = 0xa54ff53a;
+        h[4] = 0x510e527f;
+        h[5] = 0x9b05688c;
+        h[6] = 0x1f83d9ab;
+        h[7] = 0x5be0cd19;
+        bitlen = 0;
+        bufferLen = 0;
+    }
+
+  private:
+    uint32_t h[8];
+    uint64_t bitlen;
+    uint8_t buffer[64];
+    size_t bufferLen;
+
+    void transform(const uint8_t block[64]) {
+        uint32_t w[64];
+
+        for (int i = 0; i < 16; ++i) {
+            w[i] = (block[i * 4] << 24) | (block[i * 4 + 1] << 16) | (block[i * 4 + 2] << 8) | (block[i * 4 + 3]);
+        }
+
+        for (int i = 16; i < 64; ++i) {
+            w[i] = theta1(w[i - 2]) + w[i - 7] + theta0(w[i - 15]) + w[i - 16];
+        }
+
+        uint32_t a = h[0];
+        uint32_t b = h[1];
+        uint32_t c = h[2];
+        uint32_t d = h[3];
+        uint32_t e = h[4];
+        uint32_t f = h[5];
+        uint32_t g = h[6];
+        uint32_t h_val = h[7];
+
+        for (int i = 0; i < 64; ++i) {
+            uint32_t temp1 = h_val + sig1(e) + choose(e, f, g) + K[i] + w[i];
+            uint32_t temp2 = sig0(a) + majority(a, b, c);
+            h_val = g;
+            g = f;
+            f = e;
+            e = d + temp1;
+            d = c;
+            c = b;
+            b = a;
+            a = temp1 + temp2;
+        }
+
+        h[0] += a;
+        h[1] += b;
+        h[2] += c;
+        h[3] += d;
+        h[4] += e;
+        h[5] += f;
+        h[6] += g;
+        h[7] += h_val;
+    }
+
+    static uint32_t rotr(uint32_t x, uint32_t n) { return (x >> n) | (x << (32 - n)); }
+    static uint32_t choose(uint32_t e, uint32_t f, uint32_t g) { return (e & f) ^ (~e & g); }
+    static uint32_t majority(uint32_t a, uint32_t b, uint32_t c) { return (a & b) ^ (a & c) ^ (b & c); }
+    static uint32_t sig0(uint32_t x) { return rotr(x, 2) ^ rotr(x, 13) ^ rotr(x, 22); }
+    static uint32_t sig1(uint32_t x) { return rotr(x, 6) ^ rotr(x, 11) ^ rotr(x, 25); }
+    static uint32_t theta0(uint32_t x) { return rotr(x, 7) ^ rotr(x, 18) ^ (x >> 3); }
+    static uint32_t theta1(uint32_t x) { return rotr(x, 17) ^ rotr(x, 19) ^ (x >> 10); }
+
+    const uint32_t K[64] = {0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be,
+                            0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa,
+                            0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85,
+                            0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+                            0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
+                            0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+};
+} // namespace CRYPTO
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+inline std::string sha256(const std::string &data) {
+    CRYPTO::SHA256 sha;
+    sha.update(data);
+    return sha.digest();
+}
+
+inline std::string sha256Binary(const std::string &data) {
+    CRYPTO::SHA256 sha;
+    sha.update(data);
+    return sha.digestBinary(); // directly returns 256-bit binary string
+}
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class RandomNumberGenerator {
+  public:
+    inline std::string run() {
+        std::string result;
+        result.reserve((totalIterations - localBufferSize) * 256);
+
+        for (int i = 0; i < totalIterations; ++i) {
+
+            long long duration = countdown();
+            ++count;
+            globalSum += duration;
+            globalAvg = globalSum / count;
+
+            int bit = duration < globalAvg ? 0 : 1;
+
+            if (localBits.size() >= localBufferSize)
+                localBits.pop_front();
+
+            localBits.push_back(bit);
+
+            if (localBits.size() == localBufferSize) {
+                // 32 raw bytes → 256 bit string
+                std::string hashBits = hashLocalBits();
+                result += hashBits;
+            }
+        }
+
+        return result;
+    }
+
+  private:
+    CRYPTO::SHA256 sha;
+    std::deque<int> localBits;
+    const int totalIterations = 1000;
+    const size_t localBufferSize = 512;
+    long long globalSum = 0;
+    long long globalAvg = 0;
+    int count = 0;
+
+    inline long long countdown() {
+        int x = 10;
+        auto start = systemClock.getNanoseconds();
+        while (x > 0)
+            x--;
+        auto end = systemClock.getNanoseconds();
+        return end - start;
+    }
+
+    inline std::string hashLocalBits() {
+        // Build 64-byte block
+        uint8_t bytes[64] = {0};
+        for (size_t i = 0; i < localBits.size(); ++i) {
+            if (localBits[i]) {
+                bytes[i / 8] |= (1 << (7 - (i % 8)));
+            }
+        }
+
+        sha.update(bytes, 64);
+
+        // Return 256-bit binary string using fast helper
+        return sha.digestBinary();
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class BinaryEntropyPool {
+  public:
+    inline std::string get(size_t bitsNeeded) {
+        std::lock_guard<std::mutex> lock(poolMutex);
+
+        // Refill the pool until we have enough bits
+        while (bitPool.size() < bitsNeeded) {
+            bitPool += rng.run(); // rng.run() now returns a bit string
+        }
+
+        // Extract exactly the number of bits requested
+        std::string result = bitPool.substr(0, bitsNeeded);
+        bitPool.erase(0, bitsNeeded); // remove consumed bits
+
+        return result;
+    }
+
+  private:
+    std::string bitPool; // bit string directly
+    RandomNumberGenerator rng;
+    mutable std::mutex poolMutex;
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class HMAC {
+  public:
+    static std::string compute(const std::string &key, const std::string &message) {
+        // Step 1: Normalize key to 64 bytes
+        std::string K = normalizeKey(key);
+
+        // Step 2: Create inner and outer padded keys
+        std::string ipad(BLOCK_SIZE, 0x36);
+        std::string opad(BLOCK_SIZE, 0x5c);
+
+        for (size_t i = 0; i < BLOCK_SIZE; ++i) {
+            ipad[i] ^= K[i];
+            opad[i] ^= K[i];
+        }
+
+        // Step 3: Inner hash
+        std::string inner = sha256Binary(ipad + message);
+
+        // Step 4: Outer hash
+        return sha256Binary(opad + inner);
+    }
+
+  private:
+    static constexpr size_t BLOCK_SIZE = 64; // SHA-256 block size
+    static constexpr size_t HASH_SIZE = 32;  // SHA-256 output size
+
+    static std::string normalizeKey(const std::string &key) {
+        if (key.size() > BLOCK_SIZE) {
+            return sha256Binary(key);
+        }
+
+        std::string out = key;
+        out.resize(BLOCK_SIZE, 0x00);
+        return out;
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class KeyDerivation {
+  public:
+    DerivedKey deriveKey() {
+        DerivedKey out{};
+
+        std::string password = getPassword();
+        out.salt = generateSalt();
+
+        std::string U = HMAC::compute(password, out.salt);
+        std::string T = U;
+
+        for (uint32_t i = 1; i < ITERATIONS; ++i) {
+            U = HMAC::compute(password, U);
+            xorInPlace(T, U);
+        }
+
+        out.key = T;
+
+        wipeString(password);
+        wipeString(U);
+
+        return out;
+    }
+
+  private:
+    static constexpr uint32_t ITERATIONS = 100'000;
+    static constexpr size_t SALT_BYTES = 16;
+
+    std::string getPassword() {
+        std::string password;
+        std::cout << "Enter password: ";
+        std::cin >> password;
+        return password;
+    }
+
+    std::string generateSalt() {
+        BinaryEntropyPool bep;
+        return bep.get(SALT_BYTES * 8);
+    }
+
+    void xorInPlace(std::string &a, const std::string &b) {
+        for (size_t i = 0; i < a.size(); ++i) {
+            a[i] ^= b[i];
+        }
+    }
+
+    void wipeString(std::string &s) {
+        if (!s.empty()) {
+            wipeWithEntropy(s.data(), s.size());
+            s.clear();
+            s.shrink_to_fit();
+        }
+    }
+
+    void wipeWithEntropy(void *ptr, size_t len) {
+        BinaryEntropyPool bep;
+        std::string entropy = bep.get(len * 8);
+
+        volatile uint8_t *p = static_cast<volatile uint8_t *>(ptr);
+
+        for (size_t i = 0; i < len; ++i) {
+            p[i] = static_cast<uint8_t>(entropy[i]);
+        }
+    }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+class AES {
+  public:
+    using byte = uint8_t;
+
+    // ===== Public CBC entry points =====
+    std::vector<byte> encryptCBC128(const std::vector<byte> &plaintext, const byte key[16], const byte iv[16]) { return encryptCBC(plaintext, key, 4, 10, iv); }
+
+    std::vector<byte> encryptCBC192(const std::vector<byte> &plaintext, const byte key[24], const byte iv[16]) { return encryptCBC(plaintext, key, 6, 12, iv); }
+
+    std::vector<byte> encryptCBC256(const std::vector<byte> &plaintext, const byte key[32], const byte iv[16]) { return encryptCBC(plaintext, key, 8, 14, iv); }
+
+  private:
+    static constexpr int BLOCK_SIZE = 16;
+
+    // ===== Core AES operations =====
+    byte gmul(byte a, byte b) {
+        byte p = 0;
+        while (b) {
+            if (b & 1)
+                p ^= a;
+            a = (a << 1) ^ ((a & 0x80) ? 0x1B : 0);
+            b >>= 1;
+        }
+        return p;
+    }
+
+    void SubBytes(byte *s) {
+        for (int i = 0; i < 16; i++)
+            s[i] = sbox[s[i]];
+    }
+
+    void ShiftRows(byte *s) {
+        byte t[16];
+        memcpy(t, s, 16);
+
+        s[1] = t[5];
+        s[5] = t[9];
+        s[9] = t[13];
+        s[13] = t[1];
+        s[2] = t[10];
+        s[6] = t[14];
+        s[10] = t[2];
+        s[14] = t[6];
+        s[3] = t[15];
+        s[7] = t[3];
+        s[11] = t[7];
+        s[15] = t[11];
+    }
+
+    void MixColumns(byte *s) {
+        for (int i = 0; i < 4; i++) {
+            int c = i * 4;
+            byte a = s[c], b = s[c + 1], d = s[c + 2], e = s[c + 3];
+
+            s[c] = gmul(a, 2) ^ gmul(b, 3) ^ d ^ e;
+            s[c + 1] = a ^ gmul(b, 2) ^ gmul(d, 3) ^ e;
+            s[c + 2] = a ^ b ^ gmul(d, 2) ^ gmul(e, 3);
+            s[c + 3] = gmul(a, 3) ^ b ^ d ^ gmul(e, 2);
+        }
+    }
+
+    void AddRoundKey(byte *s, const byte *rk) {
+        for (int i = 0; i < 16; i++)
+            s[i] ^= rk[i];
+    }
+
+    // ===== Key expansion (generic) =====
+    void KeyExpansion(const byte *key, int Nk, int Nr, byte *roundKeys) {
+        constexpr int Nb = 4;
+        int totalWords = Nb * (Nr + 1);
+
+        memcpy(roundKeys, key, Nk * 4);
+
+        byte temp[4];
+
+        for (int i = Nk; i < totalWords; i++) {
+            memcpy(temp, &roundKeys[4 * (i - 1)], 4);
+
+            if (i % Nk == 0) {
+                byte t = temp[0];
+                temp[0] = sbox[temp[1]] ^ Rcon[i / Nk];
+                temp[1] = sbox[temp[2]];
+                temp[2] = sbox[temp[3]];
+                temp[3] = sbox[t];
+            } else if (Nk > 6 && i % Nk == 4) {
+                for (int j = 0; j < 4; j++)
+                    temp[j] = sbox[temp[j]];
+            }
+
+            for (int j = 0; j < 4; j++)
+                roundKeys[4 * i + j] = roundKeys[4 * (i - Nk) + j] ^ temp[j];
+        }
+    }
+
+    // ===== Block encryption (generic) =====
+    void EncryptBlock(byte *block, const byte *rk, int Nr) {
+        AddRoundKey(block, rk);
+
+        for (int r = 1; r < Nr; r++) {
+            SubBytes(block);
+            ShiftRows(block);
+            MixColumns(block);
+            AddRoundKey(block, rk + 16 * r);
+        }
+
+        SubBytes(block);
+        ShiftRows(block);
+        AddRoundKey(block, rk + 16 * Nr);
+    }
+
+    // ===== Padding =====
+    std::vector<byte> pkcs7_pad(const std::vector<byte> &in) {
+        size_t pad = BLOCK_SIZE - (in.size() % BLOCK_SIZE);
+        std::vector<byte> out = in;
+        out.insert(out.end(), pad, static_cast<byte>(pad));
+        return out;
+    }
+
+    // ===== CBC mode (generic) =====
+    std::vector<byte> encryptCBC(const std::vector<byte> &plaintext, const byte *key, int Nk, int Nr, const byte iv[16]) {
+        byte roundKeys[240];
+        KeyExpansion(key, Nk, Nr, roundKeys);
+
+        std::vector<byte> data = pkcs7_pad(plaintext);
+        std::vector<byte> out(data.size());
+
+        byte prev[16];
+        memcpy(prev, iv, 16);
+
+        for (size_t i = 0; i < data.size(); i += 16) {
+            byte block[16];
+            for (int j = 0; j < 16; j++)
+                block[j] = data[i + j] ^ prev[j];
+
+            EncryptBlock(block, roundKeys, Nr);
+            memcpy(&out[i], block, 16);
+            memcpy(prev, block, 16);
+        }
+
+        return out;
+    }
+
+    static const byte sbox[256] = {0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0,
+                                   0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+                                   0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0,
+                                   0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+                                   0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
+                                   0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+                                   0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c,
+                                   0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+                                   0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e,
+                                   0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+                                   0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16};
+
+    static const byte Rcon[11] = {0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1B, 0x36};
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
+int main() {
+    // ===== Plaintext =====
+    std::string message = "This is a test message for AES-CBC encryption";
+    std::vector<uint8_t> plaintext(message.begin(), message.end());
+
+    // ===== Derive key =====
+    KeyDerivation kdf;
+    DerivedKey dk = kdf.deriveKey();
+
+    // Use first 32 bytes for AES-256
+    uint8_t aesKey[32];
+    memcpy(aesKey, dk.key.data(), 32);
+
+    // ===== IV (must be random in real usage!) =====
+    uint8_t iv[16] = {0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f};
+
+    // ===== Encrypt =====
+    AES aes;
+    auto ciphertext = aes.encryptCBC256(plaintext, aesKey, iv);
+
+    std::cout << "Ciphertext (hex):\n";
+    printHex(ciphertext);
+
+    // ===== Decrypt (not yet implemented) =====
+    // auto decrypted = aes.decryptCBC256(ciphertext, aesKey, iv);
+    // std::string recovered(decrypted.begin(), decrypted.end());
+    // std::cout << "Recovered text:\n" << recovered << "\n";
+
+    std::cout << "\n[NOTE] Decryption not implemented yet.\n";
+
+    return 0;
+}
