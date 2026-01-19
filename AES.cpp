@@ -493,10 +493,12 @@ class AES {
 
     // ===== Public CBC entry points =====
     std::vector<byte> encryptCBC128(const std::vector<byte> &plaintext, const byte key[16], const byte iv[16]) { return encryptCBC(plaintext, key, 4, 10, iv); }
-
     std::vector<byte> encryptCBC192(const std::vector<byte> &plaintext, const byte key[24], const byte iv[16]) { return encryptCBC(plaintext, key, 6, 12, iv); }
-
     std::vector<byte> encryptCBC256(const std::vector<byte> &plaintext, const byte key[32], const byte iv[16]) { return encryptCBC(plaintext, key, 8, 14, iv); }
+
+    std::vector<byte> decryptCBC128(const std::vector<byte> &plaintext, const byte key[16], const byte iv[16]) { return decryptCBC(plaintext, key, 4, 10, iv); }
+    std::vector<byte> decryptCBC192(const std::vector<byte> &plaintext, const byte key[24], const byte iv[16]) { return decryptCBC(plaintext, key, 6, 12, iv); }
+    std::vector<byte> decryptCBC256(const std::vector<byte> &plaintext, const byte key[32], const byte iv[16]) { return decryptCBC(plaintext, key, 8, 14, iv); }
 
   private:
     static constexpr int BLOCK_SIZE = 16;
@@ -816,7 +818,7 @@ void decryptedFile() {
     std::ifstream inFile("encrypted.dat", std::ios::binary);
     if (!inFile) {
         std::cerr << "Failed to open 'encrypted.dat'!\n";
-        return 1;
+        return false;
     }
 
     // Read salt (16 bytes)
@@ -836,14 +838,15 @@ void decryptedFile() {
 
     // --- Derive key from password + salt ---
     KeyDerivation kd;
-    DerivedKey dk = kd.deriveKeyFromPassword(password, salt);
+    std::string saltStr(reinterpret_cast<char *>(salt.data()), salt.size());
+    DerivedKey dk = kd.deriveKeyFromPassword(password, saltStr);
 
     uint8_t aesKey[32];
     memcpy(aesKey, dk.key.data(), 32);
 
     // --- Decrypt ---
     AES aes;
-    std::vector<uint8_t> plaintextBytes = aes.decryptCBC(ciphertext, aesKey, iv);
+    std::vector<uint8_t> plaintextBytes = aes.decryptCBC(ciphertext, aesKey, 8, 14, iv);
 
     // Convert bytes to string
     std::string plaintext(plaintextBytes.begin(), plaintextBytes.end());
