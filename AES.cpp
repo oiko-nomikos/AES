@@ -646,8 +646,8 @@ int main() {
     std::cout << "Using derived key for AES encryption\n\n";
 
     // --- Generate IV ---
-    RandomNumberGenerator rng;
-    auto ivBytes = rng.get(16 * 8); // 16-byte IV
+    BinaryEntropyPool bep;
+    auto ivBytes = bep.get(16 * 8); // 16-byte IV
     memcpy(iv, ivBytes.data(), 16);
     uint8_t iv[16];
 
