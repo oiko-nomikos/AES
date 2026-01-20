@@ -583,12 +583,32 @@ class AES {
         }
     }
 
-    // ===== Padding =====
+    // ===== PKCS#7 Padding =====
     std::vector<byte> pkcs7_pad(const std::vector<byte> &in) {
         size_t pad = BLOCK_SIZE - (in.size() % BLOCK_SIZE);
+        if (pad == 0)
+            pad = BLOCK_SIZE;
+
         std::vector<byte> out = in;
         out.insert(out.end(), pad, static_cast<byte>(pad));
         return out;
+    }
+
+    // ===== PKCS#7 Unpadding =====
+    void pkcs7_unpad(std::vector<byte> &data) {
+        if (data.empty() || data.size() % BLOCK_SIZE != 0)
+            throw std::runtime_error("Invalid padded data size");
+
+        byte pad = data.back();
+        if (pad < 1 || pad > BLOCK_SIZE)
+            throw std::runtime_error("Invalid PKCS#7 padding");
+
+        for (size_t i = 0; i < pad; i++) {
+            if (data[data.size() - 1 - i] != pad)
+                throw std::runtime_error("Invalid PKCS#7 padding");
+        }
+
+        data.resize(data.size() - pad);
     }
 
     // ===== Block encryption (generic) =====
@@ -640,20 +660,29 @@ class AES {
         byte t[16];
         memcpy(t, s, 16);
 
+        // Row 1 (right shift by 1)
         s[1] = t[13];
         s[5] = t[1];
         s[9] = t[5];
         s[13] = t[9];
 
+        // Row 2 (right shift by 2)
         s[2] = t[10];
         s[6] = t[14];
         s[10] = t[2];
         s[14] = t[6];
 
+        // Row 3 (right shift by 3)
         s[3] = t[7];
         s[7] = t[11];
         s[11] = t[15];
         s[15] = t[3];
+
+        // Row 0 unchanged
+        s[0] = t[0];
+        s[4] = t[4];
+        s[8] = t[8];
+        s[12] = t[12];
     }
 
     void InvMixColumns(byte *s) {
@@ -707,10 +736,7 @@ class AES {
         }
 
         // Remove PKCS#7 padding
-        size_t pad = out.back();
-        if (pad < 1 || pad > 16)
-            throw std::runtime_error("Invalid padding");
-        out.resize(out.size() - pad);
+        pkcs7_unpad(out);
 
         return out;
     }
