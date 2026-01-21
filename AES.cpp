@@ -505,6 +505,7 @@ class AES {
 
     // ===== Core AES operations =====
     byte gmul(byte a, byte b) {
+        // std::cout << "doing gmul...\n";
         byte p = 0;
         while (b) {
             if (b & 1)
@@ -515,48 +516,109 @@ class AES {
         return p;
     }
 
+    void AddRoundKey(byte *s, const byte *rk) {
+        std::cout << "doing AddRoundKey...\n";
+        for (int i = 0; i < 16; i++)
+            s[i] ^= rk[i];
+    }
+
     void SubBytes(byte *s) {
+        std::cout << "doing SubBytes...\n";
         for (int i = 0; i < 16; i++)
             s[i] = sbox[s[i]];
     }
 
+    void InvSubBytes(byte *s) {
+        std::cout << "doing InvSubBytes...\n";
+        for (int i = 0; i < 16; i++)
+            s[i] = inv_sbox[s[i]];
+    }
+
     void ShiftRows(byte *s) {
+        std::cout << "doing ShiftRows...\n";
         byte t[16];
         memcpy(t, s, 16);
 
+        // Row 0 (no shift)
+        s[0] = t[0];
+        s[4] = t[4];
+        s[8] = t[8];
+        s[12] = t[12];
+
+        // Row 1 (left shift by 1)
         s[1] = t[5];
         s[5] = t[9];
         s[9] = t[13];
         s[13] = t[1];
+
+        // Row 2 (left shift by 2)
         s[2] = t[10];
         s[6] = t[14];
         s[10] = t[2];
         s[14] = t[6];
+
+        // Row 3 (left shift by 3)
         s[3] = t[15];
         s[7] = t[3];
         s[11] = t[7];
         s[15] = t[11];
     }
 
+    void InvShiftRows(byte *s) {
+        std::cout << "doing InvShiftRows...\n";
+        byte t[16];
+        memcpy(t, s, 16);
+
+        // Row 0 (unchanged)
+        s[0] = t[0];
+        s[4] = t[4];
+        s[8] = t[8];
+        s[12] = t[12];
+
+        // Row 1 (right shift by 1)
+        s[1] = t[13];
+        s[5] = t[1];
+        s[9] = t[5];
+        s[13] = t[9];
+
+        // Row 2 (right shift by 2)
+        s[2] = t[10];
+        s[6] = t[14];
+        s[10] = t[2];
+        s[14] = t[6];
+
+        // Row 3 (right shift by 3)
+        s[3] = t[7];
+        s[7] = t[11];
+        s[11] = t[15];
+        s[15] = t[3];
+    }
+
     void MixColumns(byte *s) {
-        for (int i = 0; i < 4; i++) {
-            int c = i * 4;
-            byte a = s[c], b = s[c + 1], d = s[c + 2], e = s[c + 3];
+    for (int i = 0; i < 4; i++) {
+        byte a = s[i], b = s[i + 4], c = s[i + 8], d = s[i + 12];
 
-            s[c] = gmul(a, 2) ^ gmul(b, 3) ^ d ^ e;
-            s[c + 1] = a ^ gmul(b, 2) ^ gmul(d, 3) ^ e;
-            s[c + 2] = a ^ b ^ gmul(d, 2) ^ gmul(e, 3);
-            s[c + 3] = gmul(a, 3) ^ b ^ d ^ gmul(e, 2);
-        }
+        s[i]      = gmul(a,2) ^ gmul(b,3) ^ c ^ d;
+        s[i + 4]  = a ^ gmul(b,2) ^ gmul(c,3) ^ d;
+        s[i + 8]  = a ^ b ^ gmul(c,2) ^ gmul(d,3);
+        s[i + 12] = gmul(a,3) ^ b ^ c ^ gmul(d,2);
     }
+}
 
-    void AddRoundKey(byte *s, const byte *rk) {
-        for (int i = 0; i < 16; i++)
-            s[i] ^= rk[i];
+void InvMixColumns(byte *s) {
+    for (int i = 0; i < 4; i++) {
+        byte a = s[i], b = s[i + 4], c = s[i + 8], d = s[i + 12];
+
+        s[i]      = gmul(a,0x0e) ^ gmul(b,0x0b) ^ gmul(c,0x0d) ^ gmul(d,0x09);
+        s[i + 4]  = gmul(a,0x09) ^ gmul(b,0x0e) ^ gmul(c,0x0b) ^ gmul(d,0x0d);
+        s[i + 8]  = gmul(a,0x0d) ^ gmul(b,0x09) ^ gmul(c,0x0e) ^ gmul(d,0x0b);
+        s[i + 12] = gmul(a,0x0b) ^ gmul(b,0x0d) ^ gmul(c,0x09) ^ gmul(d,0x0e);
     }
+}
 
     // ===== Key expansion (generic) =====
     void KeyExpansion(const byte *key, int Nk, int Nr, byte *roundKeys) {
+        std::cout << "doing KeyExpansion...\n";
         constexpr int Nb = 4;
         int totalWords = Nb * (Nr + 1);
 
@@ -583,36 +645,9 @@ class AES {
         }
     }
 
-    // ===== PKCS#7 Padding =====
-    std::vector<byte> pkcs7_pad(const std::vector<byte> &in) {
-        size_t pad = BLOCK_SIZE - (in.size() % BLOCK_SIZE);
-        if (pad == 0)
-            pad = BLOCK_SIZE;
-
-        std::vector<byte> out = in;
-        out.insert(out.end(), pad, static_cast<byte>(pad));
-        return out;
-    }
-
-    // ===== PKCS#7 Unpadding =====
-    void pkcs7_unpad(std::vector<byte> &data) {
-        if (data.empty() || data.size() % BLOCK_SIZE != 0)
-            throw std::runtime_error("Invalid padded data size");
-
-        byte pad = data.back();
-        if (pad < 1 || pad > BLOCK_SIZE)
-            throw std::runtime_error("Invalid PKCS#7 padding");
-
-        for (size_t i = 0; i < pad; i++) {
-            if (data[data.size() - 1 - i] != pad)
-                throw std::runtime_error("Invalid PKCS#7 padding");
-        }
-
-        data.resize(data.size() - pad);
-    }
-
     // ===== Block encryption (generic) =====
     void EncryptBlock(byte *block, const byte *rk, int Nr) {
+        std::cout << "doing EncryptBlock...\n";
         AddRoundKey(block, rk);
 
         for (int r = 1; r < Nr; r++) {
@@ -627,8 +662,23 @@ class AES {
         AddRoundKey(block, rk + 16 * Nr);
     }
 
+    void DecryptBlock(byte *block, const byte *rk, int Nr) {
+        std::cout << "doing DecryptBlock...\n";
+        AddRoundKey(block, rk + 16 * Nr);
+        for (int r = Nr - 1; r >= 1; r--) {
+            InvShiftRows(block);
+            InvSubBytes(block);
+            AddRoundKey(block, rk + 16 * r);
+            InvMixColumns(block);
+        }
+        InvShiftRows(block);
+        InvSubBytes(block);
+        AddRoundKey(block, rk);
+    }
+
     // ===== CBC mode (generic) =====
     std::vector<byte> encryptCBC(const std::vector<byte> &plaintext, const byte *key, int Nk, int Nr, const byte iv[16]) {
+        std::cout << "doing encryptCBC...\n";
         byte roundKeys[240];
         KeyExpansion(key, Nk, Nr, roundKeys);
 
@@ -651,66 +701,8 @@ class AES {
         return out;
     }
 
-    void InvSubBytes(byte *s) {
-        for (int i = 0; i < 16; i++)
-            s[i] = inv_sbox[s[i]];
-    }
-
-    void InvShiftRows(byte *s) {
-        byte t[16];
-        memcpy(t, s, 16);
-
-        // Row 1 (right shift by 1)
-        s[1] = t[13];
-        s[5] = t[1];
-        s[9] = t[5];
-        s[13] = t[9];
-
-        // Row 2 (right shift by 2)
-        s[2] = t[10];
-        s[6] = t[14];
-        s[10] = t[2];
-        s[14] = t[6];
-
-        // Row 3 (right shift by 3)
-        s[3] = t[7];
-        s[7] = t[11];
-        s[11] = t[15];
-        s[15] = t[3];
-
-        // Row 0 unchanged
-        s[0] = t[0];
-        s[4] = t[4];
-        s[8] = t[8];
-        s[12] = t[12];
-    }
-
-    void InvMixColumns(byte *s) {
-        for (int i = 0; i < 4; i++) {
-            int c = i * 4;
-            byte a = s[c], b = s[c + 1], d = s[c + 2], e = s[c + 3];
-
-            s[c] = gmul(a, 0x0e) ^ gmul(b, 0x0b) ^ gmul(d, 0x0d) ^ gmul(e, 0x09);
-            s[c + 1] = gmul(a, 0x09) ^ gmul(b, 0x0e) ^ gmul(d, 0x0b) ^ gmul(e, 0x0d);
-            s[c + 2] = gmul(a, 0x0d) ^ gmul(b, 0x09) ^ gmul(d, 0x0e) ^ gmul(e, 0x0b);
-            s[c + 3] = gmul(a, 0x0b) ^ gmul(b, 0x0d) ^ gmul(d, 0x09) ^ gmul(e, 0x0e);
-        }
-    }
-
-    void DecryptBlock(byte *block, const byte *rk, int Nr) {
-        AddRoundKey(block, rk + 16 * Nr);
-        for (int r = Nr - 1; r >= 1; r--) {
-            InvShiftRows(block);
-            InvSubBytes(block);
-            AddRoundKey(block, rk + 16 * r);
-            InvMixColumns(block);
-        }
-        InvShiftRows(block);
-        InvSubBytes(block);
-        AddRoundKey(block, rk);
-    }
-
     std::vector<byte> decryptCBC(const std::vector<byte> &ciphertext, const byte *key, int Nk, int Nr, const byte iv[16]) {
+        std::cout << "doing decryptCBC...\n";
         byte roundKeys[240];
         KeyExpansion(key, Nk, Nr, roundKeys);
 
@@ -739,6 +731,36 @@ class AES {
         pkcs7_unpad(out);
 
         return out;
+    }
+
+    // ===== PKCS#7 Padding =====
+    std::vector<byte> pkcs7_pad(const std::vector<byte> &in) {
+        std::cout << "doing pkcs7_pad...\n";
+        size_t pad = BLOCK_SIZE - (in.size() % BLOCK_SIZE);
+        if (pad == 0)
+            pad = BLOCK_SIZE;
+
+        std::vector<byte> out = in;
+        out.insert(out.end(), pad, static_cast<byte>(pad));
+        return out;
+    }
+
+    // ===== PKCS#7 Unpadding =====
+    void pkcs7_unpad(std::vector<byte> &data) {
+        std::cout << "doing pkcs7_unpad...\n";
+        if (data.empty() || data.size() % BLOCK_SIZE != 0)
+            throw std::runtime_error("Invalid padded data size");
+
+        byte pad = data.back();
+        if (pad < 1 || pad > BLOCK_SIZE)
+            throw std::runtime_error("Invalid PKCS#7 padding");
+
+        for (size_t i = 0; i < pad; i++) {
+            if (data[data.size() - 1 - i] != pad)
+                throw std::runtime_error("Invalid PKCS#7 padding");
+        }
+
+        data.resize(data.size() - pad);
     }
 
     static inline constexpr byte inv_sbox[256] = {
@@ -885,7 +907,7 @@ void decryptedFile() {
 }
 
 int main() {
-    encyrptedFile();
+    // encyrptedFile();
     decryptedFile();
 
     return 0;
