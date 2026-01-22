@@ -866,11 +866,54 @@ class AES {
 
 class FileStorage {
   public:
-    void encryptAppFiles() {
+    void encryptWithNewKey() {
         // --- Derive New key ---
         std::cout << "Creating new key for AES encryption\n\n";
         KeyDerivation kd;
         KeyDerivation::DerivedKey dk = kd.deriveKey(); // dk.key (32 bytes), dk.salt (16 bytes)
+        std::cout << "Using derived key for AES encryption\n\n";
+
+        // --- Prepare AES key (256-bit) ---
+        uint8_t aesKey[32];
+        memcpy(aesKey, dk.key.data(), 32);
+
+        // --- Wait for Enter ---
+        std::cout << "\nPress Enter to continue...";
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        std::cin.get();
+
+        std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
+
+        for (const auto &srcPath : files) {
+            if (!fs::exists(srcPath)) {
+                std::cout << "Skipping missing file: " << srcPath << "\n";
+                continue;
+            }
+
+            auto plaintext = readFile(srcPath);
+            auto iv = aes.generateIV(bep);
+
+            uint8_t key[32];
+            std::copy(dk.key.begin(), dk.key.end(), key);
+
+            auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
+
+            // Save format: salt (16) + iv (16) + ciphertext
+            fs::path encPath = srcPath.string() + ".enc";
+            std::ofstream out(encPath, std::ios::binary);
+            out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
+            out.write(reinterpret_cast<const char *>(iv.data()), 16);
+            out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
+
+            std::cout << "Encrypted: " << srcPath << " → " << encPath << "\n";
+        }
+    }
+
+    void encryptWithOldKey() {
+        // --- Derive New key ---
+        std::cout << "Using existing key for AES encryption\n\n";
+        KeyDerivation kd;
+        KeyDerivation::DerivedKey dk = kd.deriveKeyFromPassword(password, salt); // dk.key (32 bytes), dk.salt (16 bytes)
         std::cout << "Using derived key for AES encryption\n\n";
 
         // --- Prepare AES key (256-bit) ---
@@ -992,10 +1035,18 @@ class FileStorage {
 
 int main() {
     ensureAppDirectory(); // Create program_data if missing
-
     FileStorage storage;
-    storage.encryptAppFiles();
+
+    // 🔓 On startup - run once
+    storage.encryptWithNewKey();
+
+    // 🔓 when running
     storage.decryptAppFiles();
+
+    // ===== application runs here =====
+
+    // 🔒 On shutdown
+    storage.encryptWithOldKey();
 
     std::cout << "\nPress Enter to exit...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
