@@ -53,11 +53,6 @@ void printHex(const std::vector<uint8_t> &data) {
     std::cout << std::dec << '\n';
 }
 
-struct DerivedKey {
-    std::string key;  // derived key material
-    std::string salt; // salt used
-};
-
 std::vector<uint8_t> toBytes(const std::string &s) {
     return std::vector<uint8_t>(s.begin(), s.end());
 }
@@ -399,6 +394,11 @@ class HMAC {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 
+struct DerivedKey {
+    std::vector<uint8_t> salt; // 16 bytes
+    std::string key;           // 32 bytes of binary data (for AES-256)
+};
+
 class KeyDerivation {
   public:
     DerivedKey deriveKey() {
@@ -406,9 +406,13 @@ class KeyDerivation {
 
         std::string password = getPassword();
         std::cout << "Password created, generating salt...\n\n";
-        out.salt = generateSalt();
 
-        std::string U = HMAC::compute(password, out.salt);
+        out.salt = generateSalt(); // now returns vector<uint8_t>
+
+        // Convert binary salt → string for HMAC (zero-cost view in real code, copy here for simplicity)
+        std::string salt_str(reinterpret_cast<const char *>(out.salt.data()), out.salt.size());
+
+        std::string U = HMAC::compute(password, salt_str);
         std::string T = U;
 
         for (uint32_t i = 1; i < ITERATIONS; ++i) {
@@ -424,11 +428,13 @@ class KeyDerivation {
         return out;
     }
 
-    DerivedKey deriveKeyFromPassword(const std::string &password, const std::string &salt) {
+    DerivedKey deriveKeyFromPassword(const std::string &password, const std::vector<uint8_t> &salt) {
         DerivedKey out{};
-        out.salt = salt; // use the existing salt
+        out.salt = salt;
 
-        std::string U = HMAC::compute(password, out.salt);
+        std::string salt_str(reinterpret_cast<const char *>(salt.data()), salt.size());
+
+        std::string U = HMAC::compute(password, salt_str);
         std::string T = U;
 
         for (uint32_t i = 1; i < ITERATIONS; ++i) {
@@ -452,12 +458,32 @@ class KeyDerivation {
         return password;
     }
 
-    std::string generateSalt() {
+    // Convert bit string "101010..." → 16 actual bytes
+    std::vector<uint8_t> bits_string_to_bytes(const std::string &bits, size_t wanted_bytes) {
+        if (bits.size() < wanted_bytes * 8) {
+            throw std::runtime_error("Not enough bits for requested byte length");
+        }
+        std::vector<uint8_t> result(wanted_bytes, 0);
+        for (size_t i = 0; i < wanted_bytes * 8; ++i) {
+            if (bits[i] == '1') {
+                size_t byte_idx = i / 8;
+                int bit_pos = 7 - static_cast<int>(i % 8); // MSB first
+                result[byte_idx] |= (1u << bit_pos);
+            }
+        }
+        return result;
+    }
+
+    std::vector<uint8_t> generateSalt() {
         BinaryEntropyPool bep;
-        return bep.get(SALT_BYTES * 8);
+        std::string bit_string = bep.get(SALT_BYTES * 8); // get 128 bits as "1010..."
+        return bits_string_to_bytes(bit_string, SALT_BYTES);
     }
 
     void xorInPlace(std::string &a, const std::string &b) {
+        if (a.size() != b.size()) {
+            throw std::runtime_error("XOR size mismatch");
+        }
         for (size_t i = 0; i < a.size(); ++i) {
             a[i] ^= b[i];
         }
@@ -476,7 +502,6 @@ class KeyDerivation {
         std::string entropy = bep.get(len * 8);
 
         volatile uint8_t *p = static_cast<volatile uint8_t *>(ptr);
-
         for (size_t i = 0; i < len; ++i) {
             p[i] = static_cast<uint8_t>(entropy[i]);
         }
@@ -595,26 +620,34 @@ class AES {
     }
 
     void MixColumns(byte *s) {
-    for (int i = 0; i < 4; i++) {
-        byte a = s[i], b = s[i + 4], c = s[i + 8], d = s[i + 12];
+        for (int c = 0; c < 4; c++) {
+            int i = c * 4;
+            byte a = s[i];
+            byte b = s[i + 1];
+            byte c_ = s[i + 2];
+            byte d = s[i + 3];
 
-        s[i]      = gmul(a,2) ^ gmul(b,3) ^ c ^ d;
-        s[i + 4]  = a ^ gmul(b,2) ^ gmul(c,3) ^ d;
-        s[i + 8]  = a ^ b ^ gmul(c,2) ^ gmul(d,3);
-        s[i + 12] = gmul(a,3) ^ b ^ c ^ gmul(d,2);
+            s[i] = gmul(a, 2) ^ gmul(b, 3) ^ c_ ^ d;
+            s[i + 1] = a ^ gmul(b, 2) ^ gmul(c_, 3) ^ d;
+            s[i + 2] = a ^ b ^ gmul(c_, 2) ^ gmul(d, 3);
+            s[i + 3] = gmul(a, 3) ^ b ^ c_ ^ gmul(d, 2);
+        }
     }
-}
 
-void InvMixColumns(byte *s) {
-    for (int i = 0; i < 4; i++) {
-        byte a = s[i], b = s[i + 4], c = s[i + 8], d = s[i + 12];
+    void InvMixColumns(byte *s) {
+        for (int c = 0; c < 4; c++) {
+            int i = c * 4;
+            byte a = s[i];
+            byte b = s[i + 1];
+            byte c_ = s[i + 2];
+            byte d = s[i + 3];
 
-        s[i]      = gmul(a,0x0e) ^ gmul(b,0x0b) ^ gmul(c,0x0d) ^ gmul(d,0x09);
-        s[i + 4]  = gmul(a,0x09) ^ gmul(b,0x0e) ^ gmul(c,0x0b) ^ gmul(d,0x0d);
-        s[i + 8]  = gmul(a,0x0d) ^ gmul(b,0x09) ^ gmul(c,0x0e) ^ gmul(d,0x0b);
-        s[i + 12] = gmul(a,0x0b) ^ gmul(b,0x0d) ^ gmul(c,0x09) ^ gmul(d,0x0e);
+            s[i] = gmul(a, 0x0e) ^ gmul(b, 0x0b) ^ gmul(c_, 0x0d) ^ gmul(d, 0x09);
+            s[i + 1] = gmul(a, 0x09) ^ gmul(b, 0x0e) ^ gmul(c_, 0x0b) ^ gmul(d, 0x0d);
+            s[i + 2] = gmul(a, 0x0d) ^ gmul(b, 0x09) ^ gmul(c_, 0x0e) ^ gmul(d, 0x0b);
+            s[i + 3] = gmul(a, 0x0b) ^ gmul(b, 0x0d) ^ gmul(c_, 0x09) ^ gmul(d, 0x0e);
+        }
     }
-}
 
     // ===== Key expansion (generic) =====
     void KeyExpansion(const byte *key, int Nk, int Nr, byte *roundKeys) {
@@ -873,6 +906,14 @@ void decryptedFile() {
     std::vector<uint8_t> salt(16);
     inFile.read(reinterpret_cast<char *>(salt.data()), 16);
 
+    std::cout << "Salt as hex: ";
+    for (auto b : salt)
+        printf("%02x ", b);
+    std::cout << "\nSalt as string: ";
+    for (auto b : salt)
+        std::cout << (char)b;
+    std::cout << "\n";
+
     // Read IV (16 bytes)
     uint8_t iv[16];
     inFile.read(reinterpret_cast<char *>(iv), 16);
@@ -886,8 +927,7 @@ void decryptedFile() {
 
     // --- Derive key from password + salt ---
     KeyDerivation kd;
-    std::string saltStr(reinterpret_cast<char *>(salt.data()), salt.size());
-    DerivedKey dk = kd.deriveKeyFromPassword(password, saltStr);
+    DerivedKey dk = kd.deriveKeyFromPassword(password, salt);
 
     uint8_t aesKey[32];
     memcpy(aesKey, dk.key.data(), 32);
@@ -907,7 +947,7 @@ void decryptedFile() {
 }
 
 int main() {
-    // encyrptedFile();
+    encyrptedFile();
     decryptedFile();
 
     return 0;
