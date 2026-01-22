@@ -36,6 +36,7 @@
 //   • AES (Advanced Encryption Standard) — NIST FIPS 197
 //   • SHA-256                            — NIST FIPS 180-4
 //   • HMAC                               — NIST FIPS 198
+//   • PBKDF                              — NIST SP 800-132
 //
 // No third-party copyrighted code is included for these primitives.
 // They are educational/reference implementations only.
