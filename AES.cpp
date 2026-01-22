@@ -88,11 +88,13 @@
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 
+/*
 void printHex(const std::vector<uint8_t> &data) {
     for (uint8_t b : data)
         std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(b);
     std::cout << std::dec << '\n';
 }
+*/
 
 std::vector<uint8_t> toBytes(const std::string &s) {
     return std::vector<uint8_t>(s.begin(), s.end());
@@ -278,22 +280,6 @@ class SHA256 {
                             0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
 };
 } // namespace CRYPTO
-
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-
-inline std::string sha256(const std::string &data) {
-    CRYPTO::SHA256 sha;
-    sha.update(data);
-    return sha.digest();
-}
-
-inline std::string sha256Binary(const std::string &data) {
-    CRYPTO::SHA256 sha;
-    sha.update(data);
-    return sha.digestBinary(); // directly returns 256-bit binary string
-}
 
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
