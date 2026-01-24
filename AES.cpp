@@ -1142,7 +1142,10 @@ int main() {
 
 class Penis {
   public:
-    void foidSucksDick(){std::cout << "so this one time, at band camp, i sucked his penis"}
+    void foidSucksDick() {
+        std::cout << "so this one time, at band camp, i sucked his huge penis";
+        std::cout << "then he abused my friend in the bushes and i got jelous";
+    }
 };
 
 /*
