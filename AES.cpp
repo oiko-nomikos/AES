@@ -293,6 +293,12 @@ class SHA256 {
 };
 } // namespace CRYPTO
 
+inline std::string sha256Binary(const std::string &data) {
+    CRYPTO::SHA256 sha;
+    sha.update(data);
+    return sha.digestBinary(); // directly returns 256-bit binary string
+}
+
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
@@ -361,17 +367,11 @@ class RandomNumberGenerator {
     }
 };
 
-inline std::string sha256Binary(const std::string &data) {
-    CRYPTO::SHA256 sha;
-    sha.update(data);
-    return sha.digestBinary(); // directly returns 256-bit binary string
-}
+/ -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- -- --
+                                                                                                                          //----------------------------------------------------------------------------------
+                                                                                                                          //----------------------------------------------------------------------------------
 
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-//----------------------------------------------------------------------------------
-
-class BinaryEntropyPool {
+                                                                                                                          class BinaryEntropyPool {
   public:
     inline std::string get(size_t bitsNeeded) {
         std::lock_guard<std::mutex> lock(poolMutex);
