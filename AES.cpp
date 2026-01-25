@@ -873,28 +873,74 @@ class AES {
 //----------------------------------------------------------------------------------
 //----------------------------------------------------------------------------------
 
+// Master key holder - keeps derived key in memory for the session
+struct MasterKey {
+    std::vector<uint8_t> key;  // 32 bytes for AES-256
+    std::vector<uint8_t> salt; // 16 bytes
+    bool isValid = false;
+
+    void set(const std::vector<uint8_t> &k, const std::vector<uint8_t> &s) {
+        key = k;
+        salt = s;
+        isValid = true;
+    }
+
+    void clear() {
+        // Securely wipe the key from memory
+        if (!key.empty()) {
+            volatile uint8_t *p = key.data();
+            for (size_t i = 0; i < key.size(); ++i) {
+                p[i] = 0;
+            }
+            key.clear();
+            key.shrink_to_fit();
+        }
+        if (!salt.empty()) {
+            salt.clear();
+            salt.shrink_to_fit();
+        }
+        isValid = false;
+    }
+
+    ~MasterKey() { clear(); }
+};
+
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
 class FileStorage {
   public:
-    void encryptAppFiles(bool newKey) {
+    // Initialize master key (call once at startup)
+    void initializeMasterKey(bool createNew) {
         KeyDerivation::DerivedKey dk;
-        if (newKey) {
-            std::cout << "Creating new key for AES encryption\n\n";
-            dk = kd.deriveKey(); // dk.key (32 bytes), dk.salt (16 bytes)
+
+        if (createNew) {
+            std::cout << "Creating new master key for AES encryption\n\n";
+            dk = kd.deriveKey(); // Ask for password once
             writeFile("program_data/master.salt", dk.salt);
         } else {
-            std::cout << "Using existing key for AES encryption\n\n";
+            std::cout << "Loading existing master key for AES encryption\n\n";
             auto salt = readFile("program_data/master.salt");
-            dk = kd.deriveKeyFromPassword(salt); // dk.key (32 bytes), dk.salt (16 bytes)
+            dk = kd.deriveKeyFromPassword(salt); // Ask for password once
         }
 
-        std::cout << "Using derived key for AES encryption\n\n";
+        // Convert string key to bytes
+        std::vector<uint8_t> keyBytes(dk.key.begin(), dk.key.end());
 
-        uint8_t aesKey[32];
-        memcpy(aesKey, dk.key.data(), 32);
+        // Store in master key
+        masterKey.set(keyBytes, dk.salt);
 
-        std::cout << "\nPress Enter to continue...";
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        std::cin.get();
+        std::cout << "Master key loaded and ready\n\n";
+    }
+
+    void encryptAppFiles() {
+        if (!masterKey.isValid) {
+            std::cerr << "[ERROR] Master key not initialized!\n";
+            return;
+        }
+
+        std::cout << "Using master key for encryption\n\n";
 
         std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
 
@@ -916,7 +962,7 @@ class FileStorage {
             // Add actual file data
             plaintext.insert(plaintext.end(), fileData.begin(), fileData.end());
 
-            // Skip if no data to encrypt (even with test data, should have something)
+            // Skip if no data to encrypt
             if (plaintext.empty()) {
                 std::cout << "[SKIP] No data to encrypt in: " << srcPath << "\n";
                 continue;
@@ -928,12 +974,12 @@ class FileStorage {
             // --- Generate IV ---
             auto iv = aes.generateIV(bep);
 
+            // Use master key
             uint8_t key[32];
-            std::copy(dk.key.begin(), dk.key.end(), key);
+            std::copy(masterKey.key.begin(), masterKey.key.end(), key);
 
             // --- Encrypt ---
             auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
-            std::cout << "DEBUG: Plaintext size: " << plaintext.size() << ", Ciphertext size: " << ciphertext.size() << "\n";
 
             fs::path encPath = srcPath.string() + ".enc";
 
@@ -949,7 +995,7 @@ class FileStorage {
                 out << header;
 
                 // Write salt (binary)
-                out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
+                out.write(reinterpret_cast<const char *>(masterKey.salt.data()), masterKey.salt.size());
 
                 // Write IV (binary)
                 out.write(reinterpret_cast<const char *>(iv.data()), iv.size());
@@ -957,8 +1003,8 @@ class FileStorage {
                 // Write ciphertext (binary)
                 out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
 
-                out.flush(); // Ensure data is written
-                out.close(); // Explicitly close
+                out.flush();
+                out.close();
             }
 
             // Now safe to remove original file
@@ -972,6 +1018,13 @@ class FileStorage {
     }
 
     void decryptAppFiles() {
+        if (!masterKey.isValid) {
+            std::cerr << "[ERROR] Master key not initialized!\n";
+            return;
+        }
+
+        std::cout << "Using master key for decryption\n\n";
+
         std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
 
         size_t fileIndex = 0;
@@ -1003,24 +1056,21 @@ class FileStorage {
                     continue;
                 }
 
-                // Read header (unencrypted) - find the double newline that marks end of header
+                // Read header (unencrypted) - stop at double newline "\n\n"
                 char ch;
-                int newlineCount = 0;
+                char prevCh = 0;
                 while (in.get(ch)) {
                     header += ch;
-                    if (ch == '\n') {
-                        newlineCount++;
-                        if (newlineCount == 3) { // APPDATAv1\n + FILE:...\n + \n
-                            break;
-                        }
-                    } else {
-                        newlineCount = 0;
+                    // Check for double newline (end of header)
+                    if (prevCh == '\n' && ch == '\n') {
+                        break;
                     }
+                    prevCh = ch;
                 }
 
-                std::cout << "Header read:\n" << header << "\n";
+                std::cout << "Header read:\n" << header;
 
-                // Read salt
+                // Read salt (ignore it, we use master key)
                 in.read(reinterpret_cast<char *>(salt.data()), salt.size());
 
                 // Read IV
@@ -1029,7 +1079,7 @@ class FileStorage {
                 // Read ciphertext
                 ciphertext.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 
-                in.close(); // Explicitly close
+                in.close();
             }
 
             // --- Debug sizes ---
@@ -1051,14 +1101,11 @@ class FileStorage {
                 continue;
             }
 
-            // --- Derive key ---
-            std::cout << "Deriving key...\n";
-            auto dk = kd.deriveKeyFromPassword(salt);
+            // --- Use master key (no password prompt!) ---
+            std::cout << "Using master key for decryption\n";
 
             uint8_t key[32];
-            std::copy(dk.key.begin(), dk.key.end(), key);
-
-            std::cout << "Key derived OK\n";
+            std::copy(masterKey.key.begin(), masterKey.key.end(), key);
 
             // --- Decrypt ---
             std::cout << "Decrypting...\n";
@@ -1075,7 +1122,6 @@ class FileStorage {
                 std::cout << "Removing encrypted file...";
                 fs::remove(encPath);
                 std::cout << " OK\n";
-                std::cout << "Encrypted file removed\n";
             } catch (const fs::filesystem_error &e) {
                 std::cerr << "[WARN] Could not delete encrypted file: " << encPath << "\n" << e.what() << "\n";
             }
@@ -1086,10 +1132,17 @@ class FileStorage {
         std::cout << "\n===== Decryption complete =====\n";
     }
 
+    // Clear master key from memory (call on exit)
+    void clearMasterKey() {
+        masterKey.clear();
+        std::cout << "Master key cleared from memory\n";
+    }
+
   private:
     KeyDerivation kd;
     AES aes;
     BinaryEntropyPool bep;
+    MasterKey masterKey; // Single master key for entire session
 
     // Helper: read entire file into vector<byte>
     std::vector<AES::byte> readFile(const fs::path &path) {
@@ -1120,36 +1173,49 @@ class FileStorage {
     }
 };
 
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+//----------------------------------------------------------------------------------
+
 int main() {
-    ensureAppDirectory(); // Create program_data if missing
+    ensureAppDirectory();
     ensureAppFiles();
     FileStorage storage;
 
-    std::cout << "\nProgram has started - Press Enter to Encrypt files...";
+    std::cout << "\nProgram has started - Press Enter to initialize master key...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     std::cin.get();
 
-    // On startup - run once
+    // Initialize master key ONCE (asks for password once)
+    std::cout << "\nInitializing master key...";
+    storage.initializeMasterKey(true);
+
+    std::cout << "\nPress Enter to encrypt files...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.get();
+
+    // Encrypt all files (uses master key, no password prompt)
     std::cout << "\nEncrypting files...";
-    storage.encryptAppFiles(true);
+    storage.encryptAppFiles();
 
-    std::cout << "\nPress Enter to Decrypt files...";
+    std::cout << "\nPress Enter to decrypt files...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     std::cin.get();
 
-    // when running
+    // Decrypt all files (uses master key, no password prompt)
     std::cout << "\nDecrypting files...";
     storage.decryptAppFiles();
 
-    // ===== application runs here =====
-
-    std::cout << "\nPress Enter to Re-Encrypt files wih same Key...";
+    std::cout << "\nPress Enter to re-encrypt files...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
     std::cin.get();
 
-    // On shutdown
-    std::cout << "\nEncrypting files...";
-    storage.encryptAppFiles(false);
+    // Re-encrypt (uses same master key, no password prompt)
+    std::cout << "\nRe-encrypting files...";
+    storage.encryptAppFiles();
+
+    // Clear master key from memory on exit
+    storage.clearMasterKey();
 
     std::cout << "\nPress Enter to exit...";
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
