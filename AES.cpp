@@ -906,100 +906,75 @@ class FileStorage {
 
             auto fileData = readFile(srcPath);
 
-            if (fileData.empty()) {
-                std::cout << "[SKIP] Empty file: " << srcPath << "\n";
+            std::vector<uint8_t> plaintext;
+
+            // --- Build payload to encrypt ---
+            // TESTING LINE - comment out after testing
+            std::string testData = "Hello World - Test encryption\n";
+            plaintext.insert(plaintext.end(), testData.begin(), testData.end());
+
+            // Add actual file data
+            plaintext.insert(plaintext.end(), fileData.begin(), fileData.end());
+
+            // Skip if no data to encrypt (even with test data, should have something)
+            if (plaintext.empty()) {
+                std::cout << "[SKIP] No data to encrypt in: " << srcPath << "\n";
                 continue;
             }
 
-            std::vector<uint8_t> plaintext;
+            // --- Create header (unencrypted) ---
+            std::string header = "APPDATAv1\nFILE:" + srcPath.filename().string() + "\n\n";
 
-            auto appendString = [&](const std::string &s) { plaintext.insert(plaintext.end(), s.begin(), s.end()); };
-
-            // --- Header ---
-            appendString("APPDATAv1\n");
-            appendString("FILE:");
-            appendString(srcPath.filename().string());
-            appendString("\n\n");
-
-            // --- Payload ---
-            plaintext.insert(plaintext.end(), fileData.begin(), fileData.end());
-
-            // --- IV ---
+            // --- Generate IV ---
             auto iv = aes.generateIV(bep);
 
             uint8_t key[32];
             std::copy(dk.key.begin(), dk.key.end(), key);
 
+            // --- Encrypt ---
             auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
+            std::cout << "DEBUG: Plaintext size: " << plaintext.size() << ", Ciphertext size: " << ciphertext.size() << "\n";
 
             fs::path encPath = srcPath.string() + ".enc";
-            std::ofstream out(encPath, std::ios::binary);
 
-            out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
-            out.write(reinterpret_cast<const char *>(iv.data()), iv.size());
-            out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
+            // Write to file in a scoped block to ensure it's closed
+            {
+                std::ofstream out(encPath, std::ios::binary);
+                if (!out) {
+                    std::cerr << "[ERROR] Failed to create encrypted file: " << encPath << "\n";
+                    continue;
+                }
 
-            out.close();
+                // Write header as text (unencrypted)
+                out << header;
 
-            fs::remove(srcPath);
+                // Write salt (binary)
+                out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
 
-            std::cout << "Encrypted: " << srcPath << " -> " << encPath << "\n";
+                // Write IV (binary)
+                out.write(reinterpret_cast<const char *>(iv.data()), iv.size());
+
+                // Write ciphertext (binary)
+                out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
+
+                out.flush(); // Ensure data is written
+                out.close(); // Explicitly close
+            }
+
+            // Now safe to remove original file
+            try {
+                fs::remove(srcPath);
+                std::cout << "Encrypted: " << srcPath << " -> " << encPath << "\n";
+            } catch (const fs::filesystem_error &e) {
+                std::cerr << "[WARN] Could not delete original file: " << srcPath << "\n" << e.what() << "\n";
+            }
         }
-
-        /*
-                for (const auto &srcPath : files) {
-                    if (!fs::exists(srcPath)) {
-                        std::cout << "Skipping missing file: " << srcPath << "\n";
-                        continue;
-                    }
-
-                    // Read plaintext
-                    auto plaintext = readFile(srcPath);
-
-                    // Generate IV
-                    auto iv = aes.generateIV(bep);
-
-                    uint8_t key[32];
-                    std::copy(dk.key.begin(), dk.key.end(), key);
-
-                    // Encrypt
-                    auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
-
-                    // Write encrypted file
-                    fs::path encPath = srcPath.string() + ".enc";
-                    {
-                        std::ofstream out(encPath, std::ios::binary);
-                        if (!out) {
-                            std::cerr << "Failed to write encrypted file: " << encPath << "\n";
-                            continue; // skip deletion if writing failed
-                        }
-
-                        out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
-                        out.write(reinterpret_cast<const char *>(iv.data()), iv.size());
-                        out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
-                    } // <-- file stream closes here
-
-                    // Remove original plaintext after successful encryption
-                    try {
-                        fs::remove(srcPath);
-                        std::cout << "Encrypted and removed plaintext: " << srcPath << " --> " << encPath << "\n";
-                    } catch (const fs::filesystem_error &e) {
-                        std::cerr << "Failed to delete plaintext: " << e.what() << "\n";
-                    }
-                }*/
     }
 
     void decryptAppFiles() {
         std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
 
         size_t fileIndex = 0;
-
-        auto plaintext = readFile(srcPath);
-
-        if (plaintext.empty()) {
-            std::cout << "[SKIP] File is empty: " << srcPath << "\n";
-            continue;
-        }
 
         for (const auto &plainPath : files) {
             ++fileIndex;
@@ -1018,7 +993,9 @@ class FileStorage {
             std::vector<uint8_t> salt(16);
             std::array<uint8_t, 16> iv{};
             std::vector<uint8_t> ciphertext;
+            std::string header;
 
+            // Read file in scoped block
             {
                 std::ifstream in(encPath, std::ios::binary);
                 if (!in) {
@@ -1026,10 +1003,33 @@ class FileStorage {
                     continue;
                 }
 
+                // Read header (unencrypted) - find the double newline that marks end of header
+                char ch;
+                int newlineCount = 0;
+                while (in.get(ch)) {
+                    header += ch;
+                    if (ch == '\n') {
+                        newlineCount++;
+                        if (newlineCount == 3) { // APPDATAv1\n + FILE:...\n + \n
+                            break;
+                        }
+                    } else {
+                        newlineCount = 0;
+                    }
+                }
+
+                std::cout << "Header read:\n" << header << "\n";
+
+                // Read salt
                 in.read(reinterpret_cast<char *>(salt.data()), salt.size());
+
+                // Read IV
                 in.read(reinterpret_cast<char *>(iv.data()), iv.size());
 
+                // Read ciphertext
                 ciphertext.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+
+                in.close(); // Explicitly close
             }
 
             // --- Debug sizes ---
@@ -1039,7 +1039,10 @@ class FileStorage {
 
             // --- Sanity checks ---
             if (ciphertext.empty()) {
-                std::cerr << "[ERROR] Ciphertext is empty\n";
+                std::cout << "[SKIP] No encrypted data (header only)\n";
+                // Create empty file
+                std::ofstream out(plainPath, std::ios::binary);
+                out.close();
                 continue;
             }
 
@@ -1068,13 +1071,14 @@ class FileStorage {
             std::cout << "Plaintext written\n";
 
             // --- Remove encrypted file ---
-            /*            try {
-                            std::cout << "Removing encyprted file";
-                            fs::remove(encPath);
-                            std::cout << "Encrypted file removed\n";
-                        } catch (const fs::filesystem_error &e) {
-                            std::cerr << "[WARN] Could not delete encrypted file: " << encPath << "\n" << e.what() << "\n";
-                        }*/
+            try {
+                std::cout << "Removing encrypted file...";
+                fs::remove(encPath);
+                std::cout << " OK\n";
+                std::cout << "Encrypted file removed\n";
+            } catch (const fs::filesystem_error &e) {
+                std::cerr << "[WARN] Could not delete encrypted file: " << encPath << "\n" << e.what() << "\n";
+            }
 
             std::cout << "[SUCCESS] File #" << fileIndex << " decrypted\n";
         }
@@ -1111,6 +1115,8 @@ class FileStorage {
             throw std::runtime_error("Cannot write file: " + path.string());
 
         file.write(reinterpret_cast<const char *>(data.data()), data.size());
+        file.flush();
+        file.close();
     }
 };
 
@@ -1122,6 +1128,10 @@ int main() {
     // On startup - run once
     std::cout << "\nEncrypt files...";
     storage.encryptAppFiles(true);
+
+    std::cout << "\nPress Enter to Decrypt files...";
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    std::cin.get();
 
     // when running
     std::cout << "\nDecrypt files...";
@@ -1139,357 +1149,3 @@ int main() {
 
     return 0;
 }
-
-class Penis {
-  public:
-    void foidSucksDick() {
-        std::cout << "so this one time, at band camp, i sucked his huge penis";
-        std::cout << "then he abused my friend in the bushes and i got jelous";
-    }
-};
-
-/*
-    void decryptAppFiles() {
-        std::vector<fs::path> encFiles;
-        for (const auto &entry : fs::directory_iterator(APP_DIR)) {
-            if (entry.path().extension() == ".enc") {
-                encFiles.push_back(entry.path());
-            }
-        }
-
-        if (encFiles.empty()) {
-            std::cout << "No encrypted files found.\n";
-            return;
-        }
-
-        for (const auto &encPath : encFiles) {
-            try {
-                std::cout << "Starting decryption for: " << encPath << "\n";
-
-                // Read entire encrypted file
-                auto encData = readFile(encPath);
-
-                std::cout << "Read encrypted data, size: " << encData.size() << "\n";
-
-                if (encData.size() < 32) {
-                    std::cout << "Invalid encrypted file (too small): " << encPath << "\n";
-                    continue;
-                }
-
-                // Extract salt, IV, ciphertext
-                std::vector<uint8_t> salt(encData.begin(), encData.begin() + 16);
-                std::array<uint8_t, 16> iv;
-                std::copy(encData.begin() + 16, encData.begin() + 32, iv.begin());
-                std::vector<uint8_t> ciphertext(encData.begin() + 32, encData.end());
-
-                std::cout << "Extracted salt, IV, ciphertext (size: " << ciphertext.size() << ")\n";
-
-                // Derive key
-                auto dk = kd.deriveKeyFromPassword(salt);
-                uint8_t key[32];
-                std::copy(dk.key.begin(), dk.key.end(), key);
-
-                std::cout << "Derived key\n";
-
-                if (ciphertext.size() != 16) {
-                    std::cout << "Skipping test — not single block case\n";
-                } else {
-                    std::cout << "Single-block ciphertext detected — this is the crash case\n";
-                }
-
-                std::cout << "\nPress Enter to exit...";
-                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-                std::cin.get();
-
-                // Decrypt
-                auto plaintextBytes = aes.decryptCBC256(ciphertext, key, iv.data());
-
-                std::cout << "Decrypted data, plaintext size: " << plaintextBytes.size() << "\n";
-
-                // Write decrypted file
-                fs::path origPath = encPath;
-                origPath.replace_extension("");
-                writeFile(origPath, plaintextBytes);
-
-                std::cout << "Wrote decrypted file: " << origPath << "\n";
-
-                // Remove encrypted file
-                fs::remove(encPath);
-
-                std::cout << "Removed encrypted file: " << encPath << "\n";
-                std::cout << "Decrypted: " << encPath << " --> " << origPath << "\n";
-            } catch (const std::exception &e) {
-                std::cerr << "Error during decryption of " << encPath << ": " << e.what() << "\n";
-                // Optionally continue or break based on needs
-            }
-        }
-    }
-*/
-
-/*
-class FileStorage {
-  public:
-    void encryptAppFiles(bool newKey) {
-        KeyDerivation::DerivedKey dk;
-        if (newKey) {
-            std::cout << "Creating new key for AES encryption\n\n";
-            dk = kd.deriveKey(); // dk.key (32 bytes), dk.salt (16 bytes)
-            writeFile("program_data/master.salt", dk.salt);
-        } else {
-            std::cout << "Using existing key for AES encryption\n\n";
-            auto salt = readFile("program_data/master.salt");
-            dk = kd.deriveKeyFromPassword(salt); // dk.key (32 bytes), dk.salt (16 bytes)
-        }
-
-        std::cout << "Using derived key for AES encryption\n\n";
-
-        uint8_t aesKey[32];
-        memcpy(aesKey, dk.key.data(), 32);
-
-        std::cout << "\nPress Enter to continue...";
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-        std::cin.get();
-
-        std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
-
-        for (const auto &srcPath : files) {
-            if (!fs::exists(srcPath)) {
-                std::cout << "Skipping missing file: " << srcPath << "\n";
-                continue;
-            }
-
-            // Read plaintext
-            auto plaintext = readFile(srcPath);
-
-            // Generate IV
-            auto iv = aes.generateIV(bep);
-
-            uint8_t key[32];
-            std::copy(dk.key.begin(), dk.key.end(), key);
-
-            // Encrypt
-            auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
-
-            // Write encrypted file
-            fs::path encPath = srcPath.string() + ".enc";
-            {
-                std::ofstream out(encPath, std::ios::binary);
-                if (!out) {
-                    std::cerr << "Failed to write encrypted file: " << encPath << "\n";
-                    continue; // skip deletion if writing failed
-                }
-
-                out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
-                out.write(reinterpret_cast<const char *>(iv.data()), iv.size());
-                out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
-            } // <-- file stream closes here
-
-            // Remove original plaintext after successful encryption
-            try {
-                fs::remove(srcPath);
-                std::cout << "Encrypted and removed plaintext: " << srcPath << " --> " << encPath << "\n";
-            } catch (const fs::filesystem_error &e) {
-                std::cerr << "Failed to delete plaintext: " << e.what() << "\n";
-            }
-        }
-    }
-
-    void decryptAppFiles() {
-        std::vector<fs::path> encFiles;
-        for (const auto &entry : fs::directory_iterator(APP_DIR)) {
-            if (entry.path().extension() == ".enc") {
-                encFiles.push_back(entry.path());
-            }
-        }
-
-        if (encFiles.empty()) {
-            std::cout << "No encrypted files found.\n";
-            return;
-        }
-
-        for (const auto &encPath : encFiles) {
-            // --- Read everything in a scoped block ---
-            std::vector<uint8_t> salt(16);
-            std::array<uint8_t, 16> iv{};
-            std::vector<uint8_t> ciphertext;
-
-            {
-                std::ifstream in(encPath, std::ios::binary);
-                if (!in) {
-                    std::cout << "Failed to open: " << encPath << "\n";
-                    continue;
-                }
-
-                in.read(reinterpret_cast<char *>(salt.data()), salt.size());
-                in.read(reinterpret_cast<char *>(iv.data()), iv.size());
-
-                ciphertext.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-
-                // File closes here when 'in' goes out of scope
-            }
-
-            // --- Derive key ---
-            auto dk = kd.deriveKeyFromPassword(salt);
-            uint8_t key[32];
-            std::copy(dk.key.begin(), dk.key.end(), key);
-
-            // --- Decrypt in memory ---
-            auto plaintextBytes = aes.decryptCBC256(ciphertext, key, iv.data());
-
-            // --- Write decrypted file ---
-            fs::path origPath = encPath;
-            origPath.replace_extension("");
-            writeFile(origPath, plaintextBytes);
-
-            // --- Remove encrypted file ---
-            fs::remove(encPath);
-
-            std::cout << "Decrypted: " << encPath << " --> " << origPath << "\n";
-        }
-    }
-
-  private:
-    KeyDerivation kd;
-    AES aes;
-    BinaryEntropyPool bep;
-
-    // Helper: read entire file into vector<byte>
-    std::vector<AES::byte> readFile(const fs::path &path) {
-        std::ifstream file(path, std::ios::binary | std::ios::ate);
-        if (!file)
-            throw std::runtime_error("Cannot open file: " + path.string());
-
-        auto size = file.tellg();
-        std::vector<AES::byte> buffer(size);
-
-        file.seekg(0, std::ios::beg);
-        file.read(reinterpret_cast<char *>(buffer.data()), size);
-        return buffer;
-    }
-
-    // Helper: write vector<byte> to file
-    void writeFile(const fs::path &path, const std::vector<AES::byte> &data) {
-        std::ofstream file(path, std::ios::binary);
-        if (!file)
-            throw std::runtime_error("Cannot write file: " + path.string());
-
-        file.write(reinterpret_cast<const char *>(data.data()), data.size());
-    }
-};
-
-int main() {
-    ensureAppDirectory(); // Create program_data if missing
-    ensureAppFiles();
-    FileStorage storage;
-
-    // On startup - run once
-    std::cout << "\nEncrypt files...";
-    storage.encryptAppFiles(true);
-
-    // when running
-    std::cout << "\nDecrypt files...";
-    storage.decryptAppFiles();
-
-    // ===== application runs here =====
-
-    // On shutdown
-    std::cout << "\nEncrypt files...";
-    storage.encryptAppFiles(false);
-
-    std::cout << "\nPress Enter to exit...";
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-    std::cin.get();
-
-    return 0;
-}
-
-
-
-void encryptAppFiles(bool newKey) {
-    KeyDerivation::DerivedKey dk;
-    if (newKey) {
-        std::cout << "Creating new key for AES encryption\n\n";
-        dk = kd.deriveKey(); // dk.key (32 bytes), dk.salt (16 bytes)
-        writeFile("program_data/master.salt", dk.salt);
-    } else {
-        std::cout << "Using existing key for AES encryption\n\n";
-        auto salt = readFile("program_data/master.salt");
-        dk = kd.deriveKeyFromPassword(salt); // dk.key (32 bytes), dk.salt (16 bytes)
-    }
-
-    std::cout << "Using derived key for AES encryption\n\n";
-
-    // --- Prepare AES key (256-bit) ---
-    uint8_t aesKey[32];
-    memcpy(aesKey, dk.key.data(), 32);
-
-    // --- Wait for Enter ---
-    std::cout << "\nPress Enter to continue...";
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-    std::cin.get();
-
-    std::vector<fs::path> files = {file_1, file_2, file_3, file_4, file_5};
-
-    for (const auto &srcPath : files) {
-        if (!fs::exists(srcPath)) {
-            std::cout << "Skipping missing file: " << srcPath << "\n";
-            continue;
-        }
-
-        auto plaintext = readFile(srcPath);
-        auto iv = aes.generateIV(bep);
-
-        uint8_t key[32];
-        std::copy(dk.key.begin(), dk.key.end(), key);
-
-        auto ciphertext = aes.encryptCBC256(plaintext, key, iv.data());
-
-        // Save format: salt (16) + iv (16) + ciphertext
-        fs::path encPath = srcPath.string() + ".enc";
-        std::ofstream out(encPath, std::ios::binary);
-        out.write(reinterpret_cast<const char *>(dk.salt.data()), dk.salt.size());
-        out.write(reinterpret_cast<const char *>(iv.data()), 16);
-        out.write(reinterpret_cast<const char *>(ciphertext.data()), ciphertext.size());
-
-        std::cout << "Encrypted: " << srcPath << " --> " << encPath << "\n";
-    }
-}
-
-for (const auto &encPath : encFiles) {
-    std::ifstream in(encPath, std::ios::binary);
-    if (!in) {
-        std::cout << "Failed to open: " << encPath << "\n";
-        continue;
-    }
-
-    // --- Read salt ---
-    std::vector<uint8_t> salt(16);
-    in.read(reinterpret_cast<char *>(salt.data()), 16);
-
-    // --- Read IV ---
-    std::array<uint8_t, 16> iv{};
-    in.read(reinterpret_cast<char *>(iv.data()), 16);
-
-    // --- Read ciphertext ---
-    std::vector<uint8_t> ciphertext((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-
-    // --- Close file ---
-    in.close();
-
-    // --- Derive key ---
-    auto dk = kd.deriveKeyFromPassword(salt);
-
-    uint8_t key[32];
-    std::copy(dk.key.begin(), dk.key.end(), key);
-
-    // --- Decrypt ---
-    auto plaintextBytes = aes.decryptCBC256(ciphertext, key, iv.data());
-
-    fs::path origPath = encPath;
-    origPath.replace_extension("");
-    writeFile(origPath, plaintextBytes);
-    fs::remove(encPath);
-
-    std::cout << "Decrypted: " << encPath << " --> " << origPath << "\n";
-}
-*/
